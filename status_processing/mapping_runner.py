@@ -5,24 +5,10 @@ from contextlib import ExitStack
 from .validation import validator
 
 
-def evaluate_chain(evs, code_field):
-    if hasattr(validator, "evaluate_events") and hasattr(validator, "build_event_context"):
-        events = validator.build_event_context(evs, code_field)
-        l1, l2, l3, _, _ = validator.evaluate_events(events)
-        return l1, l2, l3
-
-    seq_codes = [row[code_field] for row in evs]
-    l1, l2, l3, _, _ = validator.evaluate_sequence(seq_codes)
-    return l1, l2, l3
-
-
-def get_skip_reason(company, evs, code_field):
-    if hasattr(validator, "build_event_context"):
-        events = validator.build_event_context(evs, code_field)
-        return validator.get_skip_reason(company, events)
-
-    seq_codes = [row[code_field] for row in evs]
-    return validator.get_skip_reason(company, seq_codes)
+def copy_events_with_codes(events, codes):
+    if len(events) != len(codes):
+        raise ValueError("Event context and code sequence lengths differ")
+    return [dict(event, code=code) for event, code in zip(events, codes)]
 
 
 def format_violation(v):
@@ -52,28 +38,24 @@ def run_company_mapping(company, input_path, output_events, output_datamart_like
     pass_l1 = 0
     pass_l2 = 0
     pass_l3 = 0
-    pass_l123 = 0
 
     pass_l1_eval = 0
     pass_l2_eval = 0
     pass_l3_eval = 0
-    pass_l123_eval = 0
 
     old_pass_l1 = 0
     old_pass_l2 = 0
     old_pass_l3 = 0
-    old_pass_l123 = 0
 
     old_pass_l1_eval = 0
     old_pass_l2_eval = 0
     old_pass_l3_eval = 0
-    old_pass_l123_eval = 0
 
-    improved_l123 = 0
-    worsened_l123 = 0
+    improved_l3 = 0
+    worsened_l3 = 0
 
-    improved_l123_eval = 0
-    worsened_l123_eval = 0
+    improved_l3_eval = 0
+    worsened_l3_eval = 0
     old_unk_events = 0
     unk_events = 0
     total_events = 0
@@ -84,10 +66,9 @@ def run_company_mapping(company, input_path, output_events, output_datamart_like
 
     for key, evs in chains.items():
         evs.sort(key=lambda r: r["_event_pos_int"], reverse=True)
-        mapped_codes, mapped_reasons = mapper.map_seq(evs)
-        event_annotations = []
-        if hasattr(mapper, "get_last_event_annotations"):
-            event_annotations = mapper.get_last_event_annotations()
+        mapped_codes, mapped_reasons, event_annotations = mapper.map_seq(evs)
+        if len(event_annotations) != len(evs):
+            raise ValueError("Event annotations length does not match event count")
 
         original_codes = []
         for r in evs:
@@ -105,17 +86,20 @@ def run_company_mapping(company, input_path, output_events, output_datamart_like
             r["mapped_status_code"] = mapped_codes[i]
             r["mapped_reason"] = mapped_reasons[i]
             r["original_status_code"] = original_codes[i]
-            annotations = event_annotations[i] if i < len(event_annotations) else {}
+            annotations = event_annotations[i]
             for col in annotation_columns:
                 r[col] = annotations.get(col, "")
 
-        old_l1, old_l2, old_l3 = evaluate_chain(evs, "original_status_code")
-        old_ok = old_l1[0] and old_l2[0] and old_l3[0]
+        base_events = validator.build_event_context(evs, "mapped_status_code")
+        old_events = copy_events_with_codes(base_events, original_codes)
+        mapped_events = copy_events_with_codes(base_events, mapped_codes)
+        old_l1, old_l2, old_l3, _, _ = validator.evaluate_events(old_events)
+        l1, l2, l3, _, _ = validator.evaluate_events(mapped_events)
+        skip_reason = validator.get_skip_reason(key[0], mapped_events)
 
-        l1, l2, l3 = evaluate_chain(evs, "mapped_status_code")
-        new_ok = l1[0] and l2[0] and l3[0]
+        old_ok = old_l3[0]
+        new_ok = l3[0]
 
-        skip_reason = get_skip_reason(key[0], evs, "mapped_status_code")
         is_skipped = bool(skip_reason)
 
         for i, r in enumerate(evs):
@@ -131,7 +115,6 @@ def run_company_mapping(company, input_path, output_events, output_datamart_like
         pass_l1 += 1 if l1[0] else 0
         pass_l2 += 1 if l2[0] else 0
         pass_l3 += 1 if l3[0] else 0
-        pass_l123 += 1 if (l1[0] and l2[0] and l3[0]) else 0
 
         if is_skipped:
             skipped_chains += 1
@@ -140,27 +123,24 @@ def run_company_mapping(company, input_path, output_events, output_datamart_like
             pass_l1_eval += 1 if l1[0] else 0
             pass_l2_eval += 1 if l2[0] else 0
             pass_l3_eval += 1 if l3[0] else 0
-            pass_l123_eval += 1 if (l1[0] and l2[0] and l3[0]) else 0
 
         old_pass_l1 += 1 if old_l1[0] else 0
         old_pass_l2 += 1 if old_l2[0] else 0
         old_pass_l3 += 1 if old_l3[0] else 0
-        old_pass_l123 += 1 if (old_l1[0] and old_l2[0] and old_l3[0]) else 0
 
         if not is_skipped:
             old_pass_l1_eval += 1 if old_l1[0] else 0
             old_pass_l2_eval += 1 if old_l2[0] else 0
             old_pass_l3_eval += 1 if old_l3[0] else 0
-            old_pass_l123_eval += 1 if (old_l1[0] and old_l2[0] and old_l3[0]) else 0
 
         if (not old_ok) and new_ok:
-            improved_l123 += 1
+            improved_l3 += 1
             if not is_skipped:
-                improved_l123_eval += 1
+                improved_l3_eval += 1
         if old_ok and (not new_ok):
-            worsened_l123 += 1
+            worsened_l3 += 1
             if not is_skipped:
-                worsened_l123_eval += 1
+                worsened_l3_eval += 1
 
         changed_count = sum(1 for a, b in zip(original_codes, mapped_codes) if a != b)
         changed_share = (changed_count / len(mapped_codes)) if mapped_codes else 0.0
@@ -182,11 +162,9 @@ def run_company_mapping(company, input_path, output_events, output_datamart_like
                 "old_pass_level_1": int(old_l1[0]),
                 "old_pass_level_2": int(old_l2[0]),
                 "old_pass_level_3": int(old_l3[0]),
-                "old_pass_l1_l2_l3": int(old_ok),
                 "pass_level_1": int(l1[0]),
                 "pass_level_2": int(l2[0]),
                 "pass_level_3": int(l3[0]),
-                "pass_l1_l2_l3": int(l1[0] and l2[0] and l3[0]),
                 "violation_level_1": format_violation(l1[1]),
                 "violation_level_2": format_violation(l2[1]),
                 "violation_level_3": format_violation(l3[1])
@@ -271,11 +249,9 @@ def run_company_mapping(company, input_path, output_events, output_datamart_like
             "old_pass_level_1",
             "old_pass_level_2",
             "old_pass_level_3",
-            "old_pass_l1_l2_l3",
             "pass_level_1",
             "pass_level_2",
             "pass_level_3",
-            "pass_l1_l2_l3",
             "violation_level_1",
             "violation_level_2",
             "violation_level_3"
@@ -317,11 +293,6 @@ def run_company_mapping(company, input_path, output_events, output_datamart_like
         f"({pass_l3 / total_chains:.4f})" if total_chains else ""
     )
     print(
-        "L1+L2+L3 pass (all chains):",
-        pass_l123,
-        f"({pass_l123 / total_chains:.4f})" if total_chains else ""
-    )
-    print(
         "L1 pass (evaluated only):",
         pass_l1_eval,
         f"({pass_l1_eval / evaluated_chains:.4f})" if evaluated_chains else ""
@@ -335,11 +306,6 @@ def run_company_mapping(company, input_path, output_events, output_datamart_like
         "L3 pass (evaluated only):",
         pass_l3_eval,
         f"({pass_l3_eval / evaluated_chains:.4f})" if evaluated_chains else ""
-    )
-    print(
-        "L1+L2+L3 pass (evaluated only):",
-        pass_l123_eval,
-        f"({pass_l123_eval / evaluated_chains:.4f})" if evaluated_chains else ""
     )
     print(
         "OLD L1 pass (all chains):",
@@ -357,11 +323,6 @@ def run_company_mapping(company, input_path, output_events, output_datamart_like
         f"({old_pass_l3 / total_chains:.4f})" if total_chains else ""
     )
     print(
-        "OLD L1+L2+L3 pass (all chains):",
-        old_pass_l123,
-        f"({old_pass_l123 / total_chains:.4f})" if total_chains else ""
-    )
-    print(
         "OLD L1 pass (evaluated only):",
         old_pass_l1_eval,
         f"({old_pass_l1_eval / evaluated_chains:.4f})" if evaluated_chains else ""
@@ -376,15 +337,10 @@ def run_company_mapping(company, input_path, output_events, output_datamart_like
         old_pass_l3_eval,
         f"({old_pass_l3_eval / evaluated_chains:.4f})" if evaluated_chains else ""
     )
-    print(
-        "OLD L1+L2+L3 pass (evaluated only):",
-        old_pass_l123_eval,
-        f"({old_pass_l123_eval / evaluated_chains:.4f})" if evaluated_chains else ""
-    )
-    print("Improved L1+L2+L3 chains:", improved_l123)
-    print("Worsened L1+L2+L3 chains:", worsened_l123)
-    print("Improved L1+L2+L3 chains (evaluated only):", improved_l123_eval)
-    print("Worsened L1+L2+L3 chains (evaluated only):", worsened_l123_eval)
+    print("Improved L3 chains:", improved_l3)
+    print("Worsened L3 chains:", worsened_l3)
+    print("Improved L3 chains (evaluated only):", improved_l3_eval)
+    print("Worsened L3 chains (evaluated only):", worsened_l3_eval)
 
     print("Top mapping rules:")
     for reason, cnt in reason_counts.most_common(15):

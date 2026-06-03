@@ -84,14 +84,14 @@ def action_family(code):
     return ACTION_OTHER
 
 
-def build_event_context(rows, code_field):
+def build_event_context(rows, status_code_field):
     count = len(rows)
     events = []
     for row in rows:
         events.append(
             {
                 "row": row,
-                "code": row.get(code_field, ""),
+                "code": row.get(status_code_field, ""),
                 "raw_status": SequenceMapperBase.normalize_status(row.get("event_status", "")),
                 "has_pol_location_index_context": has_pol_location_index_context(row),
                 "at_pol": is_event_at_pol(row),

@@ -220,25 +220,24 @@ class CmaCgmMappingRulesMixin:
         return "UNK", "NO_RULE_UNK"
 
 
-    def _map_seq_core(self, ordered_events):
+    def _map_seq_core(self, ordered_events, chain_context):
         mapped_codes = []
         mapped_reasons = []
         phase_tracker = self.phase_tracker
         phase_tracker.reset()
-        chain_ctx = self._build_chain_context(ordered_events)
-        chain_ctx["ordered_events"] = ordered_events
+        chain_context["ordered_events"] = ordered_events
 
         for idx, _event in enumerate(ordered_events):
             state = phase_tracker.current_phase
-            if chain_ctx["historical_outlier_unk"][idx]:
+            if chain_context["historical_outlier_unk"][idx]:
                 code = "UNK"
                 reason = "RULE_HISTORICAL_OUTLIER_EVENT_UNK"
-            elif chain_ctx["duplicate_non_actual_unk"][idx]:
+            elif chain_context["duplicate_non_actual_unk"][idx]:
                 code = "UNK"
                 reason = "RULE_DUPLICATE_NON_ACTUAL_UNK"
             else:
                 code, reason = self._map_event(
-                    state, ordered_events, chain_ctx, idx, mapped_codes
+                    state, ordered_events, chain_context, idx, mapped_codes
                 )
 
             mapped_codes.append(code)

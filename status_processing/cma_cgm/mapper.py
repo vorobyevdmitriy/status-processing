@@ -192,13 +192,16 @@ class CmaCgmMapper(
 
     def __init__(self):
         self.phase_tracker = ContainerPhaseTracker()
-        self._last_event_annotations = []
-        self._last_chain_annotation = {}
 
 
     def map_seq(self, ordered_events):
-        mapped_codes, mapped_reasons = self._map_seq_core(ordered_events)
+        chain_context = self._build_chain_context(ordered_events)
+        mapped_codes, mapped_reasons = self._map_seq_core(
+            ordered_events, chain_context
+        )
         self._reset_review_state(len(ordered_events))
-        self._annotate_chain_consistency(ordered_events, mapped_codes, mapped_reasons)
-        self._finalize_review_annotations(len(ordered_events))
-        return mapped_codes, mapped_reasons
+        self._annotate_chain_consistency(
+            ordered_events, mapped_codes, mapped_reasons, chain_context
+        )
+        event_annotations = self._finalize_review_annotations(len(ordered_events))
+        return mapped_codes, mapped_reasons, event_annotations

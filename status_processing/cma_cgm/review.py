@@ -70,12 +70,12 @@ class CmaCgmReviewMixin:
         chain_codes = "|".join(sorted(self._chain_review_codes))
         chain_details = " || ".join(self._chain_review_details)
         chain_should_review = "1" if self._chain_review_codes else "0"
-        self._last_chain_annotation = {
+        chain_annotation = {
             "chain_should_review": chain_should_review,
             "chain_review_codes": chain_codes,
             "chain_review_details": chain_details,
         }
-        self._last_event_annotations = []
+        event_annotations = []
         for idx in range(count):
             event_codes = "|".join(sorted(self._event_review_codes[idx]))
             event_details = " || ".join(self._event_review_details[idx])
@@ -85,16 +85,9 @@ class CmaCgmReviewMixin:
                 "event_review_codes": event_codes,
                 "event_review_details": event_details,
             }
-            row_annotation.update(self._last_chain_annotation)
-            self._last_event_annotations.append(row_annotation)
-
-
-    def get_last_event_annotations(self):
-        return self._last_event_annotations
-
-
-    def get_last_chain_annotation(self):
-        return self._last_chain_annotation
+            row_annotation.update(chain_annotation)
+            event_annotations.append(row_annotation)
+        return event_annotations
 
 
     def _nearby_prev(
@@ -1103,27 +1096,30 @@ class CmaCgmReviewMixin:
         return ""
 
 
-    def _annotate_chain_consistency(self, ordered_events, codes, reasons):
-        chain_ctx = self._build_chain_context(ordered_events)
-        raw_statuses = chain_ctx["raw_statuses"]
+    def _annotate_chain_consistency(
+        self, ordered_events, codes, reasons, chain_context
+    ):
+        raw_statuses = chain_context["raw_statuses"]
         changed = False
 
         changed |= self._mark_historical_outlier_events(ordered_events, reasons)
         changed |= self._mark_inverted_pre_export_marine_block(
-            ordered_events, codes, reasons, raw_statuses, chain_ctx
+            ordered_events, codes, reasons, raw_statuses, chain_context
         )
         changed |= self._mark_misplaced_final_arrivals(
-            ordered_events, codes, reasons, raw_statuses, chain_ctx
+            ordered_events, codes, reasons, raw_statuses, chain_context
         )
         changed |= self._mark_misplaced_chain_head_events(
-            ordered_events, codes, reasons, raw_statuses, chain_ctx
+            ordered_events, codes, reasons, raw_statuses, chain_context
         )
         changed |= self._restore_export_preparation_after_order_anomaly(
             ordered_events, codes, reasons, raw_statuses
         )
-        self._restore_reviewable_clear_codes(ordered_events, codes, reasons, chain_ctx)
+        self._restore_reviewable_clear_codes(
+            ordered_events, codes, reasons, chain_context
+        )
         changed |= self._apply_raw_lts_phase_hints(
-            ordered_events, codes, reasons, chain_ctx
+            ordered_events, codes, reasons, chain_context
         )
         changed |= self._restore_tail_fragments_without_import_anchor(
             ordered_events, codes, reasons, raw_statuses
@@ -1132,7 +1128,7 @@ class CmaCgmReviewMixin:
             ordered_events, codes, reasons, raw_statuses
         )
         changed |= self._mark_intervening_foreign_load_order_reviews(
-            ordered_events, raw_statuses, chain_ctx
+            ordered_events, raw_statuses, chain_context
         )
         changed |= self._mark_swapped_pairs(ordered_events, raw_statuses, codes, reasons)
         changed |= self._mark_embedded_foreign_route_blocks(ordered_events, codes, reasons)
@@ -1147,7 +1143,7 @@ class CmaCgmReviewMixin:
             if idx in self._suppress_event_consistency_checks:
                 continue
             reason = self._unsupported_marine_reason(
-                ordered_events, codes, idx, chain_ctx
+                ordered_events, codes, idx, chain_context
             )
             if reason:
                 self._add_review(

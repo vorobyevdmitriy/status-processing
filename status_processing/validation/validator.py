@@ -8,6 +8,7 @@ from ..config.paths import (
     MAPPED_DATAMART_CMA_CGM,
     VALIDATION_RESULTS_CMA_CGM,
 )
+from ..container_state import ContainerPhaseTracker
 from ..domain_context import (
     ACTION_ARRIVE,
     ACTION_DEPART,
@@ -273,42 +274,6 @@ class Code:
 
         self.current_code = code
         return True, prev_code
-
-
-class ContainerPhaseTracker:
-    PRE_EXPORT = "pre_export"
-    LOADED = "loaded"
-    DEPARTED = "departed"
-    ARRIVED = "arrived"
-    DISCHARGED = "discharged"
-    DELIVERED = "delivered"
-
-    PRE_EXPORT_CODES = {"CEP", "CPS", "CGI"}
-    LOADED_CODES = {"CLL", "CLT"}
-    DEPARTED_CODES = {"VDL", "VDT"}
-    ARRIVED_CODES = {"VAT", "VAD", "TSD"}
-    DISCHARGED_CODES = {"CDT", "CDD"}
-    DELIVERED_CODES = {"CGO", "CDC", "CER"}
-
-    def __init__(self):
-        self.reset()
-
-    def reset(self):
-        self.current_state = self.PRE_EXPORT
-
-    def advance(self, code):
-        if code in self.PRE_EXPORT_CODES:
-            self.current_state = self.PRE_EXPORT
-        elif code in self.LOADED_CODES:
-            self.current_state = self.LOADED
-        elif code in self.DEPARTED_CODES:
-            self.current_state = self.DEPARTED
-        elif code in self.ARRIVED_CODES:
-            self.current_state = self.ARRIVED
-        elif code in self.DISCHARGED_CODES:
-            self.current_state = self.DISCHARGED
-        elif code in self.DELIVERED_CODES:
-            self.current_state = self.DELIVERED
 
 
 class ActionOrder:
@@ -921,21 +886,21 @@ def evaluate_level3(events):
                     details="ready to be loaded without POL context must map to UNK"
                 )
 
-        if (raw_status in EXPORT_PREPARATION_RAW and phase.current_state != phase.PRE_EXPORT and code != "UNK"):
+        if (raw_status in EXPORT_PREPARATION_RAW and phase.current_phase != phase.PRE_EXPORT and code != "UNK"):
             return False, Violation(
                 rule_id="L3_EXPORT_PREPARATION_AFTER_MARINE",
                 idx=idx,
-                from_code=phase.current_state,
+                from_code=phase.current_phase,
                 to_code=code,
                 details="export preparation event appears after marine/import phase"
             )
 
-        if (raw_status in IMPORT_TAIL_RAW and phase.current_state not in {phase.ARRIVED, phase.DISCHARGED, phase.DELIVERED} 
+        if (raw_status in IMPORT_TAIL_RAW and phase.current_phase not in {phase.ARRIVED, phase.DISCHARGED, phase.DELIVERED} 
             and code != "UNK"):
             return False, Violation(
                 rule_id="L3_IMPORT_TAIL_BEFORE_IMPORT",
                 idx=idx,
-                from_code=phase.current_state,
+                from_code=phase.current_phase,
                 to_code=code,
                 details="import-tail event appears before import phase"
             )
@@ -1160,7 +1125,11 @@ def evaluate_events(events):
     return (True, None), (True, None), (True, None), (True, None), (True, None)
 
 
-def load_sequences(csv_path, code_field="mapped_status_code", original_code_field="original_status_code"):
+def load_sequences(
+    csv_path,
+    status_code_field="mapped_status_code",
+    original_code_field="original_status_code",
+):
     grouped = defaultdict(list)
     has_original_status_col = False
     with open(csv_path, newline="", encoding="utf-8") as f:
@@ -1171,7 +1140,7 @@ def load_sequences(csv_path, code_field="mapped_status_code", original_code_fiel
             "track_number_type",
             "container_number",
             "event_pos",
-            code_field,
+            status_code_field,
             "event_status"
         }
         missing_cols = sorted(required_cols - set(reader.fieldnames or []))
@@ -1273,7 +1242,7 @@ def main(argv=None):
 
     grouped, has_original_status_col = load_sequences(
         args.input,
-        code_field=args.code_field,
+        status_code_field=args.code_field,
         original_code_field=args.original_code_field,
     )
 
@@ -1421,9 +1390,8 @@ def main(argv=None):
             is_worsened = 0
             if has_original_status_col:
                 old_events = build_event_context(rows, args.original_code_field)
-                old_l1, old_l2, old_l3, _, _ = evaluate_events(old_events)
-                is_worsened = int((old_l1[0] and old_l2[0] and old_l3[0])
-                                    and not (l1[0] and l2[0] and l3[0]))
+                _, _, old_l3, _, _ = evaluate_events(old_events)
+                is_worsened = int(old_l3[0] and not l3[0])
 
             row_data = [
                 company,
@@ -1458,7 +1426,7 @@ def main(argv=None):
             row_data.extend(review_fields)
             writer.writerow(row_data)
 
-            if failed_writer is not None and not (l1[0] and l2[0] and l3[0]):
+            if failed_writer is not None and not l3[0]:
                 failed_writer.writerow(row_data)
 
     print("Total sequences:", total)
