@@ -49,8 +49,6 @@ class CmaCgmReviewMixin:
     def _reset_review_state(self, count):
         self._event_review_codes = [set() for _ in range(count)]
         self._event_review_details = [[] for _ in range(count)]
-        self._chain_review_codes = set()
-        self._chain_review_details = []
         self._suppress_event_consistency_checks = set()
         self._misplaced_final_arrival_indices = set()
         self._demoted_chain_head_indices = set()
@@ -61,20 +59,9 @@ class CmaCgmReviewMixin:
         self._event_review_codes[idx].add(code)
         if details and details not in self._event_review_details[idx]:
             self._event_review_details[idx].append(details)
-        self._chain_review_codes.add(code)
-        if details and details not in self._chain_review_details:
-            self._chain_review_details.append(details)
 
 
     def _finalize_review_annotations(self, count):
-        chain_codes = "|".join(sorted(self._chain_review_codes))
-        chain_details = " || ".join(self._chain_review_details)
-        chain_should_review = "1" if self._chain_review_codes else "0"
-        chain_annotation = {
-            "chain_should_review": chain_should_review,
-            "chain_review_codes": chain_codes,
-            "chain_review_details": chain_details,
-        }
         event_annotations = []
         for idx in range(count):
             event_codes = "|".join(sorted(self._event_review_codes[idx]))
@@ -85,7 +72,6 @@ class CmaCgmReviewMixin:
                 "event_review_codes": event_codes,
                 "event_review_details": event_details,
             }
-            row_annotation.update(chain_annotation)
             event_annotations.append(row_annotation)
         return event_annotations
 

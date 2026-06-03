@@ -182,12 +182,7 @@ class CmaCgmMapper(
         "event_review_codes",
         "event_review_details",
     )
-    CHAIN_ANNOTATION_COLUMNS = (
-        "chain_should_review",
-        "chain_review_codes",
-        "chain_review_details",
-    )
-    ANNOTATION_COLUMNS = EVENT_ANNOTATION_COLUMNS + CHAIN_ANNOTATION_COLUMNS
+    ANNOTATION_COLUMNS = EVENT_ANNOTATION_COLUMNS
 
 
     def __init__(self):
