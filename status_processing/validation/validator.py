@@ -1,12 +1,12 @@
 import argparse
 import csv
 from collections import Counter, defaultdict
+from contextlib import ExitStack
 from dataclasses import dataclass
 
 from ..config.paths import (
-    AUTOMATON_RESULTS_CMA_CGM_V4,
-    AUTOMATON_RESULTS_FAILED_L123_OR_SKIPPED_CMA_CGM_V4,
-    MAPPED_EVENTS_CMA_CGM_V4,
+    MAPPED_DATAMART_CMA_CGM,
+    VALIDATION_RESULTS_CMA_CGM,
 )
 from ..domain_context import (
     ACTION_ARRIVE,
@@ -16,19 +16,18 @@ from ..domain_context import (
     ACTION_LOAD,
     ACTION_OTHER,
     ACTION_PREP,
+    ARRIVE_CODES,
     DEPART_CODES,
     DELIVERY_TAIL_CODES,
     DISCHARGE_CODES,
     EXPORT_PREPARATION_CODES,
     LOAD_CODES,
-    action_family as ctx_action_family,
-    build_event_context as ctx_build_event_context,
-    is_actual_event as ctx_is_actual_event,
-    is_same_transport_call as ctx_is_same_transport_call,
-    parse_event_datetime as ctx_parse_event_datetime,
-    same_non_empty_text as ctx_same_non_empty_text,
-    is_event_at_pod as ctx_is_event_at_pod,
-    is_event_at_pol as ctx_is_event_at_pol,
+    action_family,
+    build_event_context,
+    is_actual_event,
+    is_same_transport_call,
+    parse_event_datetime,
+    same_non_empty_text,
 )
 
 
@@ -99,7 +98,7 @@ ALLOWED_NEXT = {
     "CLL": {"CDT", "VDL", "VAT", "VAD", "LTS", "BTS", "UNK"},
     "VDL": {"VAT", "VAD", "LTS", "BTS", "UNK"},
     "VAT": {"CDT", "TSD", "CLT", "VDT", "LTS", "BTS", "UNK"},
-    "CDT": {"TSD", "CLL", "CLT", "VDT", "VAD", "LTS", "BTS", "UNK"},
+    "CDT": {"TSD", "CLL", "CLT", "VDL", "VDT", "VAD", "LTS", "BTS", "UNK"},
     "TSD": {"CLT", "VDT", "CDT", "VAT", "VAD", "LTS", "BTS", "UNK"},
     "CLT": {"CDT", "VDT", "VAT", "VAD", "LTS", "BTS", "UNK"},
     "VDT": {"VAT", "CDT", "TSD", "CLT", "VAD", "LTS", "BTS", "UNK"},
@@ -113,7 +112,7 @@ ALLOWED_NEXT = {
     "UNK": MEANINGFUL_CODES | {"UNK"},
 }
 
-STRICT_ALLOWED_START = {"CEP", "CPS", "CGI"}    # сомнительно
+STRICT_ALLOWED_START = {"CEP", "CPS", "CGI"}
 
 STRICT_ALLOWED_NEXT = {
     "CEP": {"CPS", "CGI", "CLL", "VDL", "LTS", "BTS", "UNK"},
@@ -122,7 +121,7 @@ STRICT_ALLOWED_NEXT = {
     "CLL": {"CDT", "VDL"},
     "VDL": {"VAT", "VAD", "UNK"},
     "VAT": {"CDT", "CLT", "VAD", "TSD", "UNK"},
-    "CDT": {"TSD", "CLL", "CLT", "VAD", "LTS", "BTS", "UNK"},
+    "CDT": {"TSD", "CLL", "CLT", "VDL", "VAD", "LTS", "BTS", "UNK"},
     "TSD": {"CLT", "VDT", "CDT", "VAT", "VAD", "LTS", "BTS", "UNK"},
     "CLT": {"CDT", "VDT", "VAD", "TSD", "UNK"},
     "VDT": {"VAT", "VAD", "UNK"},
@@ -420,36 +419,12 @@ def format_violation(v: Violation):
     return f"{v.rule_id}|idx={v.idx}|{v.from_code}->{v.to_code}|{v.details}"
 
 
-def _same_non_empty_text(left, right):
-    return ctx_same_non_empty_text(left, right)
-
-
-# def _is_event_at_pod(row):
-#     return ctx_is_event_at_pod(row)
-
-
-#def _is_event_at_pol(row):
-#   return ctx_is_event_at_pol(row)
-
-
-def _is_same_transport_call(left, right):
-    return ctx_is_same_transport_call(left, right)
-
-
-def _parse_event_datetime(value):
-    return ctx_parse_event_datetime(value)
-
-
 def _same_non_empty_vessel(left, right):
-    return _same_non_empty_text(left.get("vessel"), right.get("vessel"))
-
-
-def _is_actual_event(row):
-    return ctx_is_actual_event(row)
+    return same_non_empty_text(left.get("vessel"), right.get("vessel"))
 
 
 def _is_sandwiched_vessel_anomaly(prev_event, cur_event, next_event):
-    if not _is_actual_event(cur_event["row"]):
+    if not is_actual_event(cur_event["row"]):
         return False
 
     if not _same_non_empty_vessel(prev_event["row"], next_event["row"]):
@@ -458,17 +433,13 @@ def _is_sandwiched_vessel_anomaly(prev_event, cur_event, next_event):
     if _same_non_empty_vessel(prev_event["row"], cur_event["row"]):
         return False
 
-    prev_dt = _parse_event_datetime(prev_event["row"].get("event_date"))
-    cur_dt = _parse_event_datetime(cur_event["row"].get("event_date"))
-    next_dt = _parse_event_datetime(next_event["row"].get("event_date"))
+    prev_dt = parse_event_datetime(prev_event["row"].get("event_date"))
+    cur_dt = parse_event_datetime(cur_event["row"].get("event_date"))
+    next_dt = parse_event_datetime(next_event["row"].get("event_date"))
     if prev_dt is None or cur_dt is None or next_dt is None:
         return False
 
     return prev_dt <= cur_dt <= next_dt
-
-
-def action_family_rank(code):
-    return ctx_action_family(code)
 
 
 def detect_post_final_anomaly(events):
@@ -598,7 +569,11 @@ def detect_location_anomaly(events):
             )
 
         if raw_status == "ready to be loaded":
-            if event["has_pol_info"] and event["at_pol"] and code != "CGI":
+            if (
+                event["has_pol_location_index_context"]
+                and event["at_pol"]
+                and code != "CGI"
+            ):
                 return Violation(
                     rule_id="L3_READY_TO_BE_LOADED_AT_POL_NOT_CGI",
                     idx=idx,
@@ -606,7 +581,11 @@ def detect_location_anomaly(events):
                     to_code=code,
                     details="ready to be loaded at POL must map to CGI"
                 )
-            if event["has_pol_info"] and (not event["at_pol"]) and code != "CLT":
+            if (
+                event["has_pol_location_index_context"]
+                and not event["at_pol"]
+                and code != "CLT"
+            ):
                 return Violation(
                     rule_id="L3_READY_TO_BE_LOADED_OUTSIDE_POL_NOT_CLT",
                     idx=idx,
@@ -614,7 +593,7 @@ def detect_location_anomaly(events):
                     to_code=code,
                     details="ready to be loaded outside POL must map to CLT"
                 )
-            if (not event["has_pol_info"]) and code != "UNK":
+            if (not event["has_pol_location_index_context"]) and code != "UNK":
                 return Violation(
                     rule_id="L3_READY_TO_BE_LOADED_WITHOUT_POL_NOT_UNK",
                     idx=idx,
@@ -682,7 +661,7 @@ def detect_transport_anomaly(events):
             later_event = events[later_idx]
             if later_event["raw_status"] != "loaded on board":
                 continue
-            if _is_same_transport_call(event["row"], later_event["row"]):
+            if is_same_transport_call(event["row"], later_event["row"]):
                 return Violation(
                     rule_id="L3_SAME_CALL_DEPARTURE_BEFORE_LOAD",
                     idx=idx,
@@ -715,10 +694,6 @@ def detect_transport_anomaly(events):
     return None
 
 
-def build_event_context(rows, code_field):
-    return ctx_build_event_context(rows, code_field)
-
-
 def evaluate_level1(events):
     state = ACTION
     state.reset()
@@ -747,7 +722,7 @@ def evaluate_level1(events):
                 details="export-preparation code appears after marine/import phase started"
             )
 
-        action = action_family_rank(code)
+        action = action_family(code)
         ok, prev_state = state.advance(action)
         if not ok:
             return False, Violation(
@@ -913,7 +888,11 @@ def evaluate_level3(events):
             )
 
         if raw_status == "ready to be loaded":
-            if event["has_pol_info"] and event["at_pol"] and code != "CGI":
+            if (
+                event["has_pol_location_index_context"]
+                and event["at_pol"]
+                and code != "CGI"
+            ):
                 return False, Violation(
                     rule_id="L3_READY_TO_BE_LOADED_AT_POL_NOT_CGI",
                     idx=idx,
@@ -921,7 +900,11 @@ def evaluate_level3(events):
                     to_code=code,
                     details="ready to be loaded at POL must map to CGI"
                 )
-            if event["has_pol_info"] and (not event["at_pol"]) and code != "CLT":
+            if (
+                event["has_pol_location_index_context"]
+                and not event["at_pol"]
+                and code != "CLT"
+            ):
                 return False, Violation(
                     rule_id="L3_READY_TO_BE_LOADED_OUTSIDE_POL_NOT_CLT",
                     idx=idx,
@@ -929,7 +912,7 @@ def evaluate_level3(events):
                     to_code=code,
                     details="ready to be loaded outside POL must map to CLT"
                 )
-            if (not event["has_pol_info"]) and code != "UNK":
+            if (not event["has_pol_location_index_context"]) and code != "UNK":
                 return False, Violation(
                     rule_id="L3_READY_TO_BE_LOADED_WITHOUT_POL_NOT_UNK",
                     idx=idx,
@@ -1124,30 +1107,60 @@ def evaluate_level5(events):
 
 
 def evaluate_events(events):
-    l1, v1 = evaluate_level1(events)
+    l1, violation_l1 = evaluate_level1(events)
     if not l1:
-        return (False, v1), (False, v1), (False, v1), (False, v1), (False, v1)
+        return (
+            (False, violation_l1),
+            (False, violation_l1),
+            (False, violation_l1),
+            (False, violation_l1),
+            (False, violation_l1),
+        )
 
-    l2, v2 = evaluate_level2(events)
+    l2, violation_l2 = evaluate_level2(events)
     if not l2:
-        return (True, None), (False, v2), (False, v2), (False, v2), (False, v2)
+        return (
+            (True, None),
+            (False, violation_l2),
+            (False, violation_l2),
+            (False, violation_l2),
+            (False, violation_l2),
+        )
 
-    l3, v3 = evaluate_level3(events)
+    l3, violation_l3 = evaluate_level3(events)
     if not l3:
-        return (True, None), (True, None), (False, v3), (False, v3), (False, v3)
+        return (
+            (True, None),
+            (True, None),
+            (False, violation_l3),
+            (False, violation_l3),
+            (False, violation_l3),
+        )
 
-    l4, v4 = evaluate_level4(events)
+    l4, violation_l4 = evaluate_level4(events)
     if not l4:
-        return (True, None), (True, None), (True, None), (False, v4), (False, v4)
+        return (
+            (True, None),
+            (True, None),
+            (True, None),
+            (False, violation_l4),
+            (False, violation_l4),
+        )
 
-    l5, v5 = evaluate_level5(events)
+    l5, violation_l5 = evaluate_level5(events)
     if not l5:
-        return (True, None), (True, None), (True, None), (True, None), (False, v5)
+        return (
+            (True, None),
+            (True, None),
+            (True, None),
+            (True, None),
+            (False, violation_l5),
+        )
 
     return (True, None), (True, None), (True, None), (True, None), (True, None)
 
 
-def load_sequences(csv_path):
+def load_sequences(csv_path, code_field="mapped_status_code", original_code_field="original_status_code"):
     grouped = defaultdict(list)
     has_original_status_col = False
     with open(csv_path, newline="", encoding="utf-8") as f:
@@ -1158,16 +1171,16 @@ def load_sequences(csv_path):
             "track_number_type",
             "container_number",
             "event_pos",
-            "mapped_status_code",
+            code_field,
             "event_status"
         }
         missing_cols = sorted(required_cols - set(reader.fieldnames or []))
         if missing_cols:
             raise ValueError(
-                f"Input has no required columns for validator_v2: {', '.join(missing_cols)}"
+                f"Input has no required columns for validator: {', '.join(missing_cols)}"
             )
 
-        has_original_status_col = "original_status_code" in (reader.fieldnames or [])
+        has_original_status_col = original_code_field in (reader.fieldnames or [])
         for row in reader:
             key = (
                 row["company"],
@@ -1181,30 +1194,88 @@ def load_sequences(csv_path):
     return grouped, has_original_status_col
 
 
+REVIEW_COLUMNS = [
+    "chain_should_review",
+    "chain_review_codes",
+    "chain_review_details",
+]
+
+
+def _split_review_codes(value):
+    return [part for part in str(value or "").split("|") if part]
+
+
+def collect_review_fields(rows):
+    chain_codes = set()
+    chain_details = []
+    seen_chain_details = set()
+    chain_should_review = False
+
+    for row in rows:
+        row_event_codes = _split_review_codes(row.get("event_review_codes"))
+        row_chain_codes = _split_review_codes(row.get("chain_review_codes"))
+        if row_event_codes or row_chain_codes:
+            chain_should_review = True
+        if str(row.get("event_should_review", "")).strip() == "1":
+            chain_should_review = True
+        if str(row.get("chain_should_review", "")).strip() == "1":
+            chain_should_review = True
+
+        for code in row_event_codes:
+            chain_codes.add(code)
+
+        for code in row_chain_codes:
+            chain_codes.add(code)
+
+        chain_detail = str(row.get("chain_review_details", "") or "").strip()
+        if not chain_detail:
+            chain_detail = str(row.get("event_review_details", "") or "").strip()
+        if chain_detail and chain_detail not in seen_chain_details:
+            seen_chain_details.add(chain_detail)
+            chain_details.append(chain_detail)
+
+    return [
+        int(chain_should_review),
+        "|".join(sorted(chain_codes)),
+        " || ".join(chain_details),
+    ]
+
+
 def get_skip_reason(company, events):
     if company in CURRENT_STATUS_ONLY_COMPANIES:
-        return "SKIP_CURRENT_STATUS_ONLY_COMPANY"
+        return "SKIP_CURRENT_STATUS_ONLY_SOURCE"
     if len(events) <= 1:
         return "SKIP_SINGLE_EVENT_CHAIN"
     return ""
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--input", default=str(MAPPED_EVENTS_CMA_CGM_V4)
+        "--input", default=str(MAPPED_DATAMART_CMA_CGM)
     )
     parser.add_argument(
         "--output",
-        default=str(AUTOMATON_RESULTS_CMA_CGM_V4),
+        default=str(VALIDATION_RESULTS_CMA_CGM),
     )
     parser.add_argument(
         "--output-failed-l123",
-        default=str(AUTOMATON_RESULTS_FAILED_L123_OR_SKIPPED_CMA_CGM_V4)
+        default="",
     )
-    args = parser.parse_args()
+    parser.add_argument("--code-field", default="event_status_code")
+    parser.add_argument("--original-code-field", default="event_status_code_original")
+    parser.add_argument(
+        "--include-review-fields",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    args = parser.parse_args(argv)
 
-    grouped, has_original_status_col = load_sequences(args.input)
+    grouped, has_original_status_col = load_sequences(
+        args.input,
+        code_field=args.code_field,
+        original_code_field=args.original_code_field,
+    )
 
     total = 0
     evaluated = 0
@@ -1251,22 +1322,34 @@ def main():
         "violation_level_4",
         "violation_level_5"
     ]
+    if args.include_review_fields:
+        output_header.extend(REVIEW_COLUMNS)
 
-    with (open(args.output, "w", newline="", encoding="utf-8") as out_f,
-          open(args.output_failed_l123, "w", newline="", encoding="utf-8") as fail_f):
+    with ExitStack() as stack:
+        out_f = stack.enter_context(open(args.output, "w", newline="", encoding="utf-8"))
         writer = csv.writer(out_f)
-        failed_writer = csv.writer(fail_f)
+        failed_writer = None
+        if args.output_failed_l123:
+            fail_f = stack.enter_context(open(args.output_failed_l123, "w", newline="", encoding="utf-8"))
+            failed_writer = csv.writer(fail_f)
+
         writer.writerow(output_header)
-        failed_writer.writerow(output_header)
+        if failed_writer is not None:
+            failed_writer.writerow(output_header)
 
         for key, rows in grouped.items():
             company, track, track_type, container = key
             rows.sort(key=lambda row: row["_event_pos_int"], reverse=True)
-            events = build_event_context(rows, "mapped_status_code")
+            events = build_event_context(rows, args.code_field)
             codes = [event["code"] for event in events]
             if not codes:
                 continue
 
+            review_fields = (
+                collect_review_fields(rows)
+                if args.include_review_fields
+                else []
+            )
             total += 1
             skip_reason = get_skip_reason(company, events)
             transport_anomaly = detect_transport_anomaly(events)
@@ -1305,8 +1388,10 @@ def main():
                     "",
                     ""
                 ]
+                row_data.extend(review_fields)
                 writer.writerow(row_data)
-                failed_writer.writerow(row_data)
+                if failed_writer is not None:
+                    failed_writer.writerow(row_data)
                 continue
 
             evaluated += 1
@@ -1335,7 +1420,7 @@ def main():
 
             is_worsened = 0
             if has_original_status_col:
-                old_events = build_event_context(rows, "original_status_code")
+                old_events = build_event_context(rows, args.original_code_field)
                 old_l1, old_l2, old_l3, _, _ = evaluate_events(old_events)
                 is_worsened = int((old_l1[0] and old_l2[0] and old_l3[0])
                                     and not (l1[0] and l2[0] and l3[0]))
@@ -1370,9 +1455,10 @@ def main():
                 format_violation(l4[1]),
                 format_violation(l5[1])
             ]
+            row_data.extend(review_fields)
             writer.writerow(row_data)
 
-            if not (l1[0] and l2[0] and l3[0]):
+            if failed_writer is not None and not (l1[0] and l2[0] and l3[0]):
                 failed_writer.writerow(row_data)
 
     print("Total sequences:", total)
@@ -1401,7 +1487,8 @@ def main():
         print(" ", rule, cnt)
 
     print("\nSaved:", args.output)
-    print("Saved failed/skip L1-L3:", args.output_failed_l123)
+    if args.output_failed_l123:
+        print("Saved failed/skip L1-L3:", args.output_failed_l123)
 
 
 if __name__ == "__main__":

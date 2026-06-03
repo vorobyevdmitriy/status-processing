@@ -29,34 +29,19 @@ def same_non_empty_text(left, right):
     return l == r
 
 
-def has_pol_context(row):
+def has_pol_location_index_context(row):
     event_loc = SequenceMapperBase.parse_nullable_int(row.get("event_location_idx"))
     pol_loc = SequenceMapperBase.parse_nullable_int(row.get("pol_location_idx"))
-    if event_loc is not None and pol_loc is not None:
-        return True
-
-    event_locode = str(row.get("location_locode") or "").strip()
-    pol_locode = str(row.get("pol_locode") or "").strip()
-    return (bool(event_locode) and bool(pol_locode) and event_locode != "\\N" and pol_locode != "\\N")
+    return event_loc is not None and pol_loc is not None
 
 
 def is_event_at_pod(row):
-    matches_pod = SequenceMapperBase.parse_nullable_int(row.get("event_matches_pod"))
-    if matches_pod == 1:
-        return True
-    if same_non_empty_text(row.get("location_locode"), row.get("pod_locode")):
-        return True
     event_loc = SequenceMapperBase.parse_nullable_int(row.get("event_location_idx"))
     pod_loc = SequenceMapperBase.parse_nullable_int(row.get("pod_location_idx"))
     return event_loc is not None and pod_loc is not None and event_loc == pod_loc
 
 
 def is_event_at_pol(row):
-    matches_pol = SequenceMapperBase.parse_nullable_int(row.get("event_matches_pol"))
-    if matches_pol == 1:
-        return True
-    if same_non_empty_text(row.get("location_locode"), row.get("pol_locode")):
-        return True
     event_loc = SequenceMapperBase.parse_nullable_int(row.get("event_location_idx"))
     pol_loc = SequenceMapperBase.parse_nullable_int(row.get("pol_location_idx"))
     return event_loc is not None and pol_loc is not None and event_loc == pol_loc
@@ -108,7 +93,7 @@ def build_event_context(rows, code_field):
                 "row": row,
                 "code": row.get(code_field, ""),
                 "raw_status": SequenceMapperBase.normalize_status(row.get("event_status", "")),
-                "has_pol_info": has_pol_context(row),
+                "has_pol_location_index_context": has_pol_location_index_context(row),
                 "at_pol": is_event_at_pol(row),
                 "at_pod": is_event_at_pod(row)
             }

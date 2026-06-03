@@ -1,8 +1,8 @@
 import csv
 from collections import Counter, defaultdict
+from contextlib import ExitStack
 
-from .mapper_registry import MAPPERS
-from .validation import validator_v2 as validator
+from .validation import validator
 
 
 def evaluate_chain(evs, code_field):
@@ -31,12 +31,7 @@ def format_violation(v):
     return f"{v.rule_id}|idx={v.idx}|{v.from_code}->{v.to_code}|{v.details}"
 
 
-def run_company_mapping(company, input_path, output_events, output_datamart_like, output_chains):
-    if company not in MAPPERS:
-        raise ValueError(f"No mapper implemented for company '{company}'. Available: {', '.join(MAPPERS.keys())}")
-
-    mapper = MAPPERS[company]
-
+def run_company_mapping(company, input_path, output_events, output_datamart_like, output_chains, mapper):
     chains = defaultdict(list)
     with open(input_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -85,10 +80,14 @@ def run_company_mapping(company, input_path, output_events, output_datamart_like
     reason_counts = Counter()
 
     chain_output = []
+    annotation_columns = list(getattr(mapper, "ANNOTATION_COLUMNS", ()))
 
     for key, evs in chains.items():
         evs.sort(key=lambda r: r["_event_pos_int"], reverse=True)
         mapped_codes, mapped_reasons = mapper.map_seq(evs)
+        event_annotations = []
+        if hasattr(mapper, "get_last_event_annotations"):
+            event_annotations = mapper.get_last_event_annotations()
 
         original_codes = []
         for r in evs:
@@ -106,6 +105,9 @@ def run_company_mapping(company, input_path, output_events, output_datamart_like
             r["mapped_status_code"] = mapped_codes[i]
             r["mapped_reason"] = mapped_reasons[i]
             r["original_status_code"] = original_codes[i]
+            annotations = event_annotations[i] if i < len(event_annotations) else {}
+            for col in annotation_columns:
+                r[col] = annotations.get(col, "")
 
         old_l1, old_l2, old_l3 = evaluate_chain(evs, "original_status_code")
         old_ok = old_l1[0] and old_l2[0] and old_l3[0]
@@ -191,7 +193,11 @@ def run_company_mapping(company, input_path, output_events, output_datamart_like
             }
         )
 
-    event_columns = input_columns + ["original_status_code", "mapped_status_code", "is_code_changed", "mapped_reason"]
+    event_columns = (
+        input_columns
+        + ["original_status_code", "mapped_status_code", "is_code_changed", "mapped_reason"]
+        + [col for col in annotation_columns if col not in input_columns]
+    )
 
     datamart_like_columns = list(input_columns)
     if "event_status_code_original" not in datamart_like_columns:
@@ -211,59 +217,73 @@ def run_company_mapping(company, input_path, output_events, output_datamart_like
         else:
             datamart_like_columns.append("mapped_reason")
 
-    with (open(output_events, "w", newline="", encoding="utf-8") as f_events,
-          open(output_datamart_like, "w", newline="", encoding="utf-8") as f_datamart):
-        event_writer = csv.DictWriter(f_events, fieldnames=event_columns)
+    for col in annotation_columns:
+        if col not in datamart_like_columns:
+            datamart_like_columns.append(col)
+
+    with ExitStack() as stack:
+        event_writer = None
+        if output_events:
+            f_events = stack.enter_context(open(output_events, "w", newline="", encoding="utf-8"))
+            event_writer = csv.DictWriter(f_events, fieldnames=event_columns)
+            event_writer.writeheader()
+
+        f_datamart = stack.enter_context(open(output_datamart_like, "w", newline="", encoding="utf-8"))
         datamart_writer = csv.DictWriter(f_datamart, fieldnames=datamart_like_columns)
-        event_writer.writeheader()
         datamart_writer.writeheader()
 
         for key in sorted(chains.keys()):
             evs = chains[key]
             evs.sort(key=lambda r: r["_event_pos_int"], reverse=True)
             for r in evs:
-                event_out = {k: r.get(k, "") for k in input_columns}
-                event_out["original_status_code"] = r.get("original_status_code", "")
-                event_out["mapped_status_code"] = r.get("mapped_status_code", "")
-                event_out["is_code_changed"] = r.get("is_code_changed", "")
-                event_out["mapped_reason"] = r.get("mapped_reason", "")
-                event_writer.writerow(event_out)
+                if event_writer is not None:
+                    event_out = {k: r.get(k, "") for k in input_columns}
+                    event_out["original_status_code"] = r.get("original_status_code", "")
+                    event_out["mapped_status_code"] = r.get("mapped_status_code", "")
+                    event_out["is_code_changed"] = r.get("is_code_changed", "")
+                    event_out["mapped_reason"] = r.get("mapped_reason", "")
+                    for col in annotation_columns:
+                        event_out[col] = r.get(col, "")
+                    event_writer.writerow(event_out)
 
                 datamart_out = {k: r.get(k, "") for k in input_columns}
                 datamart_out["event_status_code_original"] = r.get("original_status_code", "")
                 datamart_out["event_status_code"] = r.get("mapped_status_code", "")
                 datamart_out["mapped_reason"] = r.get("mapped_reason", "")
+                for col in annotation_columns:
+                    datamart_out[col] = r.get(col, "")
                 datamart_writer.writerow(datamart_out)
 
-    chain_columns = [
-        "company",
-        "track_number",
-        "track_number_type",
-        "container_number",
-        "sequence_length",
-        "is_skipped",
-        "skip_reason",
-        "raw_status_sequence",
-        "original_code_sequence",
-        "mapped_code_sequence",
-        "changed_codes_count",
-        "changed_codes_share",
-        "old_pass_level_1",
-        "old_pass_level_2",
-        "old_pass_level_3",
-        "old_pass_l1_l2_l3",
-        "pass_level_1",
-        "pass_level_2",
-        "pass_level_3",
-        "pass_l1_l2_l3",
-        "violation_level_1",
-        "violation_level_2",
-        "violation_level_3"
-    ]
-    with open(output_chains, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=chain_columns)
-        writer.writeheader()
-        writer.writerows(chain_output)
+    if output_chains:
+        chain_columns = [
+            "company",
+            "track_number",
+            "track_number_type",
+            "container_number",
+            "sequence_length",
+            "is_skipped",
+            "skip_reason",
+            "raw_status_sequence",
+            "original_code_sequence",
+            "mapped_code_sequence",
+            "changed_codes_count",
+            "changed_codes_share",
+            "old_pass_level_1",
+            "old_pass_level_2",
+            "old_pass_level_3",
+            "old_pass_l1_l2_l3",
+            "pass_level_1",
+            "pass_level_2",
+            "pass_level_3",
+            "pass_l1_l2_l3",
+            "violation_level_1",
+            "violation_level_2",
+            "violation_level_3"
+        ]
+        with open(output_chains, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=chain_columns)
+            writer.writeheader()
+            writer.writerows(chain_output)
 
     print("Company:", company)
     print("Total events:", total_events)
@@ -370,6 +390,8 @@ def run_company_mapping(company, input_path, output_events, output_datamart_like
     for reason, cnt in reason_counts.most_common(15):
         print(" ", reason, cnt)
 
-    print("Saved events:", output_events)
+    if output_events:
+        print("Saved events:", output_events)
     print("Saved datamart-like:", output_datamart_like)
-    print("Saved chains:", output_chains)
+    if output_chains:
+        print("Saved chains:", output_chains)
